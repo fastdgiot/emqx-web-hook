@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -325,8 +325,8 @@ send_http_request(ClientID, Params) ->
     {ok, Path} = application:get_env(?APP, path),
     Headers = application:get_env(?APP, headers, []),
     Body = emqx_json:encode(Params),
-    ?LOG(debug, "Send to: ~0p, params: ~0s", [Path, Body]),
-    case ehttpc:request(ehttpc_pool:pick_worker(?APP, ClientID), post, {Path, Headers, Body}) of
+    ?LOG(debug, "Send to: ~0p, params: ~s", [Path, Body]),
+    case ehttpc:request({?APP, ClientID}, post, {Path, Headers, Body}) of
         {ok, StatusCode, _} when StatusCode >= 200 andalso StatusCode < 300 ->
             ok;
         {ok, StatusCode, _, _} when StatusCode >= 200 andalso StatusCode < 300 ->
@@ -338,7 +338,8 @@ send_http_request(ClientID, Params) ->
             ?LOG(warning, "HTTP request failed with status code: ~p", [StatusCode]),
             ok;
         {error, Reason} ->
-            ?LOG(error, "HTTP request error: ~p", [Reason]), ok
+            ?LOG(error, "HTTP request error: ~p", [Reason]),
+            ok
     end.
 
 parse_rule(Rules) ->
@@ -371,14 +372,16 @@ parse_from(Message) ->
     {emqx_message:from(Message), maybe(emqx_message:get_header(username, Message))}.
 
 encode_payload(Payload) ->
-    encode_payload(Payload, application:get_env(?APP, encode_payload, undefined)).
+    encode_payload(Payload, application:get_env(?APP, encoding_of_payload_field, plain)).
 
 encode_payload(Payload, base62) -> emqx_base62:encode(Payload);
 encode_payload(Payload, base64) -> base64:encode(Payload);
-encode_payload(Payload, _) -> Payload.
+encode_payload(Payload, plain) -> Payload.
 
-stringfy(Term) when is_atom(Term); is_binary(Term) ->
+stringfy(Term) when is_binary(Term) ->
     Term;
+stringfy(Term) when is_atom(Term) ->
+    atom_to_binary(Term, utf8);
 stringfy(Term) ->
     unicode:characters_to_binary((io_lib:format("~0p", [Term]))).
 

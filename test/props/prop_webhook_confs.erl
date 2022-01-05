@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -36,7 +36,7 @@ prop_confs() ->
     Schema = cuttlefish_schema:files(filelib:wildcard(code:priv_dir(emqx_web_hook) ++ "/*.schema")),
     ?ALL({Url, Confs0}, {url(), confs()},
         begin
-            Confs = [{"web.hook.api.url", Url}|Confs0],
+            Confs = [{"web.hook.url", Url}|Confs0],
             Envs = cuttlefish_generator:map(Schema, cuttlefish_conf_file(Confs)),
 
             assert_confs(Confs, Envs),
@@ -53,12 +53,13 @@ prop_confs() ->
 %%--------------------------------------------------------------------
 
 do_setup() ->
-    application:set_env(kernel, logger_level, error),
+    logger:set_primary_config(#{level => warning}),
     emqx_ct_helpers:start_apps([], fun set_special_cfgs/1),
     ok.
 
 do_teardown(_) ->
     emqx_ct_helpers:stop_apps([]),
+    logger:set_primary_config(#{level => info}),
     ok.
 
 set_special_cfgs(_) ->
@@ -66,7 +67,7 @@ set_special_cfgs(_) ->
     application:set_env(emqx, modules_loaded_file, undefined),
     ok.
 
-assert_confs([{"web.hook.api.url", Url}|More], Envs) ->
+assert_confs([{"web.hook.url", Url}|More], Envs) ->
     %% Assert!
     Url = deep_get_env("emqx_web_hook.url", Envs),
     assert_confs(More, Envs);
@@ -113,7 +114,10 @@ cuttlefish_conf_option(K, V)
 %%--------------------------------------------------------------------
 
 confs() ->
-    nof([{"web.hook.encode_payload", oneof(["base64", "base62"])},
+    nof([{"web.hook.headers.content-type",
+           oneof(["application/json"])},
+         {"web.hook.body.encoding_of_payload_field",
+           oneof(["plain", "base64", "base62"])},
          {"web.hook.rule.client.connect.1", rule_spec()},
          {"web.hook.rule.client.connack.1", rule_spec()},
          {"web.hook.rule.client.connected.1", rule_spec()},

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@ start(_StartType, _StartArgs) ->
     translate_env(),
     {ok, Sup} = emqx_web_hook_sup:start_link(),
     {ok, PoolOpts} = application:get_env(?APP, pool_opts),
-    ehttpc_sup:start_pool(?APP, PoolOpts),
+    {ok, _Pid} = ehttpc_sup:start_pool(?APP, PoolOpts),
     emqx_web_hook:register_metrics(),
     emqx_web_hook:load(),
     {ok, Sup}.
@@ -39,32 +39,19 @@ stop(_State) ->
     emqx_web_hook:unload(),
     ehttpc_sup:stop_pool(?APP).
 
-add_default_scheme(URL) when is_list(URL) ->
-    binary_to_list(add_default_scheme(list_to_binary(URL)));
-add_default_scheme(<<"http://", _/binary>> = URL) ->
-    URL;
-add_default_scheme(<<"https://", _/binary>> = URL) ->
-    URL;
-add_default_scheme(URL) ->
-    <<"http://", URL/binary>>.
-
 translate_env() ->
     {ok, URL} = application:get_env(?APP, url),
-    #{host := Host0,
-      path := Path0,
-      scheme := Scheme} = URIMap = uri_string:parse(add_default_scheme(URL)),
-    Port = maps:get(port, URIMap, case Scheme of
-                                      "https" -> 443;
-                                      _ -> 80
-                                  end),
-    Path = path(Path0),
+    {ok, #{host := Host,
+           port := Port,
+           scheme := Scheme} = URIMap} = emqx_http_lib:uri_parse(URL),
+    Path = path(URIMap),
+    {ok, EnablePipelining} = application:get_env(?APP, enable_pipelining),
     PoolSize = application:get_env(?APP, pool_size, 32),
-    {Inet, Host} = parse_host(Host0),
     MoreOpts = case Scheme of
-                   "http" ->
-                       [{transport_opts, [Inet]}];
-                   "https" ->
-                       CACertFile = application:get_env(?APP, cafile, undefined),
+                   http ->
+                       [{transport_opts, emqx_misc:ipv6_probe([])}];
+                   https ->
+                       CACertFile = application:get_env(?APP, cacertfile, undefined),
                        CertFile = application:get_env(?APP, certfile, undefined),
                        KeyFile = application:get_env(?APP, keyfile, undefined),
                        {ok, Verify} = application:get_env(?APP, verify),
@@ -72,19 +59,26 @@ translate_env() ->
                                        true -> verify_peer;
                                        false -> verify_none
                                    end,
+                       SNI = case application:get_env(?APP, server_name_indication, undefined) of
+                                 "disable" -> disable;
+                                 SNI0 -> SNI0
+                             end,
                        TLSOpts = lists:filter(fun({_K, V}) ->
-                                                V /= <<>> andalso V /= undefined andalso V /= "" andalso true
-                                              end, [{keyfile, KeyFile}, {certfile, CertFile}, {cacertfile, CACertFile}]),
-                       TlsVers = ['tlsv1.2','tlsv1.1',tlsv1],
-                       NTLSOpts = [{verify, VerifyType},
-                                   {versions, TlsVers},
-                                   {ciphers, lists:foldl(fun(TlsVer, Ciphers) ->
-                                                               Ciphers ++ ssl:cipher_suites(all, TlsVer)
-                                                           end, [], TlsVers)} | TLSOpts],
-                       [{transport, ssl}, {transport_opts, [Inet | NTLSOpts]}]
+                                                V /= <<>> andalso V /= undefined andalso V /= ""
+                                              end, [{keyfile, KeyFile},
+                                                    {certfile, CertFile},
+                                                    {cacertfile, CACertFile},
+                                                    {verify, VerifyType},
+                                                    {server_name_indication, SNI}]),
+                       NTLSOpts = [ {versions, emqx_tls_lib:default_versions()}
+                                  , {ciphers, emqx_tls_lib:default_ciphers()}
+                                  | TLSOpts
+                                  ],
+                       [{transport, ssl}, {transport_opts, emqx_misc:ipv6_probe(NTLSOpts)}]
                 end,
     PoolOpts = [{host, Host},
                 {port, Port},
+                {enable_pipelining, EnablePipelining},
                 {pool_size, PoolSize},
                 {pool_type, hash},
                 {connect_timeout, 5000},
@@ -96,23 +90,15 @@ translate_env() ->
     NHeaders = set_content_type(Headers),
     application:set_env(?APP, headers, NHeaders).
 
-path("") ->
+path(#{path := "", 'query' := Query}) ->
+    "?" ++ Query;
+path(#{path := Path, 'query' := Query}) ->
+    Path ++ "?" ++ Query;
+path(#{path := ""}) ->
     "/";
-path(Path) ->
+path(#{path := Path}) ->
     Path.
 
 set_content_type(Headers) ->
     NHeaders = proplists:delete(<<"Content-Type">>, proplists:delete(<<"content-type">>, Headers)),
     [{<<"content-type">>, <<"application/json">>} | NHeaders].
-
-parse_host(Host) ->
-    case inet:parse_address(Host) of
-        {ok, Addr} when size(Addr) =:= 4 -> {inet, Addr};
-        {ok, Addr} when size(Addr) =:= 8 -> {inet6, Addr};
-        {error, einval} ->
-            case inet:getaddr(Host, inet6) of
-                {ok, _} -> {inet6, Host};
-                {error, _} -> {inet, Host}
-            end
-    end.
-
